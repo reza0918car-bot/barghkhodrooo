@@ -1,2 +1,0 @@
-# barghkhodroo
-bargh khodro mohandes
