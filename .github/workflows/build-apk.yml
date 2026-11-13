@@ -1,0 +1,109 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v5
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Clean Dependencies and Cache
+        run: |
+          rm -f pubspec.lock
+          flutter clean
+          rm -rf ~/.gradle/caches
+          flutter pub get
+          flutter pub upgrade --major-versions
+
+      - name: Regenerate Android & Apply Fixes
+        run: |
+          # ۱. ساخت مجدد پوشه اندروید
+          rm -rf android
+          flutter create --platforms=android .
+          
+          # ۲. تغییر نام برنامه و اضافه کردن مجوزها
+          sed -i 's/android:label="[^"]*"/android:label="برق خودرو مهندس"/g' android/app/src/main/AndroidManifest.xml
+          sed -i '/<manifest/a \    <uses-permission android:name="android.permission.INTERNET"\/>' android/app/src/main/AndroidManifest.xml
+          sed -i '/<manifest/a \    <uses-permission android:name="android.permission.SEND_SMS"\/>' android/app/src/main/AndroidManifest.xml
+          
+          # ۳. تنظیم minSdkVersion
+          sed -i 's/minSdkVersion = flutter.minSdkVersion/minSdkVersion = 23/' android/app/build.gradle.kts 2>/dev/null || true
+          sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 23/' android/app/build.gradle 2>/dev/null || true
+
+          # ۴. تنظیم compileSdkVersion پروژه اصلی به 36
+          sed -i 's/compileSdk[[:space:]]*=.*/compileSdk = 36/g' android/app/build.gradle.kts 2>/dev/null || true
+          sed -i 's/compileSdkVersion[[:space:]].*/compileSdkVersion 36/g' android/app/build.gradle 2>/dev/null || true
+          
+          echo "--- بررسی نهایی compileSdk در build.gradle.kts ---"
+          grep -n "compileSdk" android/app/build.gradle.kts || true
+          
+          # 👈 ۵. ساخت خودکار آیکون برنامه
+          echo "Generating App Icons..."
+          dart run flutter_launcher_icons
+
+      - name: Fix sms_sender_background Plugin
+        run: |
+          PLUGIN_DIR=$(find ~/.pub-cache -type d -name "sms_sender_background-*" | head -n 1)
+          
+          if [ -n "$PLUGIN_DIR" ]; then
+            echo "Found plugin at: $PLUGIN_DIR"
+            
+            MANIFEST_FILE="$PLUGIN_DIR/android/src/main/AndroidManifest.xml"
+            if [ -f "$MANIFEST_FILE" ]; then
+              sed -i 's/package="[^"]*"//g' "$MANIFEST_FILE"
+              echo "Removed package attribute from AndroidManifest.xml"
+            fi
+            
+            GRADLE_FILE="$PLUGIN_DIR/android/build.gradle"
+            if [ -f "$GRADLE_FILE" ]; then
+              if ! grep -q "namespace" "$GRADLE_FILE"; then
+                sed -i '/android {/a \    namespace "com.example.sms_sender_background"' "$GRADLE_FILE"
+              fi
+              
+              sed -i 's/compileSdkVersion[[:space:]].*/compileSdkVersion 36/g' "$GRADLE_FILE"
+              sed -i 's/compileSdk[[:space:]]*=.*/compileSdk = 36/g' "$GRADLE_FILE"
+              echo "Updated compileSdkVersion to 36 for plugin"
+            fi
+          else
+            echo "Plugin not found, skipping..."
+          fi
+
+      - name: Build APK (with auto-retry)
+        run: |
+          success=0
+          for i in 1 2 3; do
+            echo "Build attempt $i of 3..."
+            if flutter build apk --release; then
+              success=1
+              break
+            fi
+            echo "Build attempt $i failed, retrying in 30 seconds..."
+            sleep 30
+          done
+          if [ $success -ne 1 ]; then
+            exit 1
+          fi
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: bargh-khodro-mohandes-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
